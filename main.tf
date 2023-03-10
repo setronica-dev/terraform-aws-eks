@@ -10,8 +10,6 @@ data "aws_iam_session_context" "current" {
 }
 
 locals {
-  create = var.create && var.putin_khuylo
-
   cluster_role = try(aws_iam_role.this[0].arn, var.iam_role_arn)
 
   create_outposts_local_cluster    = length(var.outpost_config) > 0
@@ -23,7 +21,7 @@ locals {
 ################################################################################
 
 resource "aws_eks_cluster" "this" {
-  count = local.create ? 1 : 0
+  count = var.create ? 1 : 0
 
   name                      = var.cluster_name
   role_arn                  = local.cluster_role
@@ -95,7 +93,7 @@ resource "aws_ec2_tag" "cluster_primary_security_group" {
   # Ref: https://github.com/terraform-aws-modules/terraform-aws-eks/pull/2006
   # Ref: https://github.com/terraform-aws-modules/terraform-aws-eks/pull/2008
   for_each = { for k, v in merge(var.tags, var.cluster_tags) :
-    k => v if local.create && k != "Name" && var.create_cluster_primary_security_group_tags && v != null
+    k => v if var.create && k != "Name" && var.create_cluster_primary_security_group_tags && v != null
   }
 
   resource_id = aws_eks_cluster.this[0].vpc_config[0].cluster_security_group_id
@@ -104,7 +102,7 @@ resource "aws_ec2_tag" "cluster_primary_security_group" {
 }
 
 resource "aws_cloudwatch_log_group" "this" {
-  count = local.create && var.create_cloudwatch_log_group ? 1 : 0
+  count = var.create && var.create_cloudwatch_log_group ? 1 : 0
 
   name              = "/aws/eks/${var.cluster_name}/cluster"
   retention_in_days = var.cloudwatch_log_group_retention_in_days
@@ -121,7 +119,7 @@ module "kms" {
   source  = "terraform-aws-modules/kms/aws"
   version = "1.1.0" # Note - be mindful of Terraform/provider version compatibility between modules
 
-  create = local.create && var.create_kms_key && local.enable_cluster_encryption_config # not valid on Outposts
+  create = var.create && var.create_kms_key && local.enable_cluster_encryption_config # not valid on Outposts
 
   description             = coalesce(var.kms_key_description, "${var.cluster_name} cluster encryption key")
   key_usage               = "ENCRYPT_DECRYPT"
@@ -154,7 +152,7 @@ module "kms" {
 
 locals {
   cluster_sg_name   = coalesce(var.cluster_security_group_name, "${var.cluster_name}-cluster")
-  create_cluster_sg = local.create && var.create_cluster_security_group
+  create_cluster_sg = var.create && var.create_cluster_security_group
 
   cluster_security_group_id = local.create_cluster_sg ? aws_security_group.cluster[0].id : var.cluster_security_group_id
 
@@ -173,7 +171,6 @@ locals {
 
 resource "aws_security_group" "cluster" {
   count = local.create_cluster_sg ? 1 : 0
-
   name        = var.cluster_security_group_use_name_prefix ? null : local.cluster_sg_name
   name_prefix = var.cluster_security_group_use_name_prefix ? "${local.cluster_sg_name}${var.prefix_separator}" : null
   description = var.cluster_security_group_description
@@ -219,15 +216,13 @@ resource "aws_security_group_rule" "cluster" {
 
 data "tls_certificate" "this" {
   # Not available on outposts
-  count = local.create && var.enable_irsa && !local.create_outposts_local_cluster ? 1 : 0
-
+  count = var.create && var.enable_irsa && !local.create_outposts_local_cluster ? 1 : 0
   url = aws_eks_cluster.this[0].identity[0].oidc[0].issuer
 }
 
 resource "aws_iam_openid_connect_provider" "oidc_provider" {
   # Not available on outposts
-  count = local.create && var.enable_irsa && !local.create_outposts_local_cluster ? 1 : 0
-
+  count = var.create && var.enable_irsa && !local.create_outposts_local_cluster ? 1 : 0
   client_id_list  = distinct(compact(concat(["sts.${local.dns_suffix}"], var.openid_connect_audiences)))
   thumbprint_list = concat(data.tls_certificate.this[0].certificates[*].sha1_fingerprint, var.custom_oidc_thumbprints)
   url             = aws_eks_cluster.this[0].identity[0].oidc[0].issuer
@@ -243,10 +238,9 @@ resource "aws_iam_openid_connect_provider" "oidc_provider" {
 ################################################################################
 
 locals {
-  create_iam_role        = local.create && var.create_iam_role
+  create_iam_role        = var.create && var.create_iam_role
   iam_role_name          = coalesce(var.iam_role_name, "${var.cluster_name}-cluster")
   iam_role_policy_prefix = "arn:${data.aws_partition.current.partition}:iam::aws:policy"
-
   cluster_encryption_policy_name = coalesce(var.cluster_encryption_policy_name, "${local.iam_role_name}-ClusterEncryption")
 
   # TODO - hopefully this can be removed once the AWS endpoint is named properly in China
@@ -255,7 +249,7 @@ locals {
 }
 
 data "aws_iam_policy_document" "assume_role_policy" {
-  count = local.create && var.create_iam_role ? 1 : 0
+  count = var.create && var.create_iam_role ? 1 : 0
 
   statement {
     sid     = "EKSClusterAssumeRole"
@@ -378,8 +372,7 @@ resource "aws_iam_policy" "cluster_encryption" {
 
 resource "aws_eks_addon" "this" {
   # Not supported on outposts
-  for_each = { for k, v in var.cluster_addons : k => v if !try(v.before_compute, false) && local.create && !local.create_outposts_local_cluster }
-
+  for_each = { for k, v in var.cluster_addons : k => v if !try(v.before_compute, false) && var.create && !local.create_outposts_local_cluster }
   cluster_name = aws_eks_cluster.this[0].name
   addon_name   = try(each.value.name, each.key)
 
@@ -406,7 +399,7 @@ resource "aws_eks_addon" "this" {
 
 resource "aws_eks_addon" "before_compute" {
   # Not supported on outposts
-  for_each = { for k, v in var.cluster_addons : k => v if try(v.before_compute, false) && local.create && !local.create_outposts_local_cluster }
+  for_each = { for k, v in var.cluster_addons : k => v if try(v.before_compute, false) && var.create && !local.create_outposts_local_cluster }
 
   cluster_name = aws_eks_cluster.this[0].name
   addon_name   = try(each.value.name, each.key)
@@ -427,7 +420,7 @@ resource "aws_eks_addon" "before_compute" {
 }
 
 data "aws_eks_addon_version" "this" {
-  for_each = { for k, v in var.cluster_addons : k => v if local.create && !local.create_outposts_local_cluster }
+  for_each = { for k, v in var.cluster_addons : k => v if var.create && !local.create_outposts_local_cluster }
 
   addon_name         = try(each.value.name, each.key)
   kubernetes_version = coalesce(var.cluster_version, aws_eks_cluster.this[0].version)
@@ -440,8 +433,7 @@ data "aws_eks_addon_version" "this" {
 ################################################################################
 
 resource "aws_eks_identity_provider_config" "this" {
-  for_each = { for k, v in var.cluster_identity_providers : k => v if local.create && !local.create_outposts_local_cluster }
-
+  for_each = { for k, v in var.cluster_identity_providers : k => v if var.create && !local.create_outposts_local_cluster }
   cluster_name = aws_eks_cluster.this[0].name
 
   oidc {
